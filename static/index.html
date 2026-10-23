@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mentor Chatbot</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --text:#1d2330; --muted:#6b7280; --user:#2557d6;
+          --bot:#eef1f6; --err:#fdecec; --errtext:#a61b1b; --border:#e3e6ec; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151b; --panel:#1a1e26; --text:#e7eaf0; --muted:#9aa3b2; --user:#3b6cf0;
+            --bot:#242a35; --err:#3a1d1f; --errtext:#ff9b9b; --border:#2c3340; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         background:var(--bg); color:var(--text); height:100dvh; display:flex; justify-content:center; }
+  .app { width:100%; max-width:760px; display:flex; flex-direction:column; height:100%;
+         background:var(--panel); border-left:1px solid var(--border); border-right:1px solid var(--border); }
+  header { padding:14px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:17px; margin:0; }
+  header .sub { font-size:12px; color:var(--muted); }
+  header button { margin-left:auto; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:85%; padding:10px 13px; border-radius:14px; line-height:1.45;
+         white-space:pre-wrap; word-wrap:break-word; font-size:15px; }
+  .user { align-self:flex-end; background:var(--user); color:#fff; border-bottom-right-radius:4px; }
+  .bot { align-self:flex-start; background:var(--bot); border-bottom-left-radius:4px; }
+  .error { align-self:center; background:var(--err); color:var(--errtext); font-size:14px; max-width:95%; }
+  .typing { color:var(--muted); font-style:italic; }
+  footer { border-top:1px solid var(--border); padding:10px 12px; }
+  form { display:flex; gap:8px; }
+  textarea { flex:1; resize:none; border:1px solid var(--border); border-radius:10px; padding:10px;
+             font:inherit; background:var(--panel); color:var(--text); min-height:44px; max-height:140px; }
+  button { border:0; border-radius:10px; padding:0 16px; font:inherit; font-weight:600; cursor:pointer;
+           background:var(--user); color:#fff; min-height:40px; }
+  button.secondary { background:transparent; color:var(--muted); border:1px solid var(--border); font-weight:500; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  #status { font-size:12px; color:var(--muted); margin-top:6px; min-height:16px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div>
+      <h1>Mentor</h1>
+      <div class="sub">Study &amp; career mentor · powered by Gemini</div>
+    </div>
+    <button class="secondary" id="newChat" type="button">New chat</button>
+  </header>
+  <div id="log" aria-live="polite"></div>
+  <footer>
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="Ask about DSA, interviews, projects…" autofocus></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+    <div id="status"></div>
+  </footer>
+</div>
+<script>
+  const log = document.getElementById("log");
+  const form = document.getElementById("form");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  const statusEl = document.getElementById("status");
+  let conversationId = null;
+  let lastFailedMessage = null;
+
+  function add(role, text) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    div.textContent = text;           // textContent, never innerHTML: no XSS
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    return div;
+  }
+
+  function greet() {
+    add("bot", "Hi! I'm Mentor. Tell me your name and what you're preparing for, and I'll help you plan.");
+  }
+
+  async function send(text) {
+    sendBtn.disabled = true;
+    const typing = add("bot typing", "Mentor is typing…");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000); // server retries up to 3 x 30s
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, conversation_id: conversationId }),
+        signal: controller.signal,
+      });
+      let data = {};
+      try { data = await res.json(); } catch { /* non-JSON error page */ }
+      typing.remove();
+      if (!res.ok) {
+        const msg = data.error || (data.detail ? "Invalid request." : `Server error (${res.status}).`);
+        throw new Error(msg);
+      }
+      conversationId = data.conversation_id;
+      add("bot", data.reply);
+      lastFailedMessage = null;
+      statusEl.textContent = `Turn ${data.turns} · ${data.messages_in_context} messages in context` +
+        (data.has_summary ? " · older messages summarised" : "");
+    } catch (err) {
+      typing.remove();
+      lastFailedMessage = text;
+      const msg = err.name === "AbortError" ? "The request timed out." :
+                  err instanceof TypeError ? "Can't reach the server. Is it running?" : err.message;
+      const e = add("error", msg + " ");
+      const retry = document.createElement("button");
+      retry.className = "secondary"; retry.type = "button"; retry.textContent = "Retry";
+      retry.onclick = () => { e.remove(); send(lastFailedMessage); };
+      e.appendChild(retry);
+    } finally {
+      clearTimeout(timer);
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || sendBtn.disabled) return;
+    add("user", text);
+    input.value = "";
+    input.style.height = "";
+    send(text);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 140) + "px";
+  });
+
+  document.getElementById("newChat").addEventListener("click", async () => {
+    if (conversationId) {
+      fetch("/api/reset", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: conversationId }) }).catch(() => {});
+    }
+    conversationId = null;
+    log.innerHTML = "";
+    statusEl.textContent = "";
+    greet();
+  });
+
+  greet();
+</script>
+</body>
+</html>
